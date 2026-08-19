@@ -6,7 +6,6 @@ const registerUser = async (req, res) => {
   try {
     const { name, email, password } = req.body;
 
-    // Validate required fields
     if (!name || !email || !password) {
       return res.status(400).json({
         success: false,
@@ -14,7 +13,6 @@ const registerUser = async (req, res) => {
       });
     }
 
-    // Basic password length validation
     if (password.length < 6) {
       return res.status(400).json({
         success: false,
@@ -22,7 +20,6 @@ const registerUser = async (req, res) => {
       });
     }
 
-    // Check whether the email already exists
     const existingUser = await User.findOne({
       email: email.toLowerCase().trim(),
     });
@@ -34,10 +31,8 @@ const registerUser = async (req, res) => {
       });
     }
 
-    // Hash the password
     const passwordHash = await bcrypt.hash(password, 12);
 
-    // Create the user
     const user = await User.create({
       name: name.trim(),
       email: email.toLowerCase().trim(),
@@ -67,7 +62,6 @@ const loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Validate required fields
     if (!email || !password) {
       return res.status(400).json({
         success: false,
@@ -75,7 +69,6 @@ const loginUser = async (req, res) => {
       });
     }
 
-    // Find the user
     const user = await User.findOne({
       email: email.toLowerCase().trim(),
     });
@@ -87,7 +80,6 @@ const loginUser = async (req, res) => {
       });
     }
 
-    // Compare password with stored hash
     const passwordMatches = await bcrypt.compare(
       password,
       user.passwordHash
@@ -100,7 +92,6 @@ const loginUser = async (req, res) => {
       });
     }
 
-    // Create JWT
     const token = jwt.sign(
       {
         userId: user._id.toString(),
@@ -131,7 +122,33 @@ const loginUser = async (req, res) => {
   }
 };
 
+const getCurrentUser = async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).select("-passwordHash");
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      user,
+    });
+  } catch (error) {
+    console.error("Get current user error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Server error while fetching user",
+    });
+  }
+};
+
 module.exports = {
   registerUser,
   loginUser,
+  getCurrentUser,
 };

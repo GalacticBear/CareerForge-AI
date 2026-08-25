@@ -238,19 +238,92 @@ def _question_keywords(question: str) -> set[str]:
 
 
 def _topic_evidence(question: str, answer: str) -> int:
+    """Estimate whether the answer contains evidence appropriate to the question intent.
+
+    This is intentionally semantic-ish rather than a strict keyword overlap check.
+    Interview answers often use different wording from the prompt; for example,
+    “Tell me about a difficult project you solved” may be answered with
+    “Built an MLOps platform...” without repeating the words “difficult” or “solved”.
+    """
     q = _normalize(question)
     a = _normalize(answer)
-    groups = [
-        ({"project", "challenge", "difficult", "problem", "solved", "solution"}, {"project", "platform", "system", "solution", "built", "developed", "implemented", "created", "deployed", "designed", "solved", "challenge", "problem"}),
-        ({"team", "teammate", "collaboration", "conflict", "leadership"}, {"team", "teammate", "collaborated", "collaboration", "stakeholder", "led", "leadership", "conflict"}),
-        ({"hire", "strength", "strengths", "fit", "why"}, {"experience", "skills", "strength", "built", "delivered", "impact", "value", "fit"}),
-        ({"failure", "mistake", "learn"}, {"failure", "mistake", "learned", "lesson", "improved", "changed"}),
-        ({"goal", "achievement", "achieved", "success"}, {"achieved", "delivered", "result", "impact", "increased", "reduced", "saved", "success"}),
-    ]
+
+    question_tokens = set(re.findall(r"[a-z0-9+#.]+", q))
+
+    project_triggers = {
+        "project", "challenge", "difficult", "problem", "solved", "solution",
+        "experience", "work", "worked", "achievement", "accomplishment",
+    }
+    project_actions = {
+        "built", "build", "developed", "develop", "implemented", "implement",
+        "created", "create", "designed", "design", "deployed", "deploy",
+        "architected", "automated", "delivered", "led", "launched", "optimized",
+        "integrated", "engineered", "migrated", "configured", "debugged",
+        "computed", "streamed", "fusing", "improved", "solved", "managed",
+        "worked", "working",
+    }
+    project_artifacts = {
+        "project", "platform", "system", "service", "pipeline", "application",
+        "model", "api", "architecture", "workflow", "solution", "product",
+        "database", "infrastructure", "mlops", "model", "automation",
+    }
+    project_outcomes = {
+        "result", "results", "impact", "increased", "increased", "reduced",
+        "improved", "boosted", "achieved", "saved", "cut", "grew", "delivered",
+        "accuracy", "revenue", "sla", "performance", "throughput", "latency",
+        "success",
+    }
+
+    team_triggers = {"team", "teammate", "collaboration", "conflict", "leadership"}
+    team_evidence = {"team", "teammate", "collaborated", "collaboration", "stakeholder", "led", "leadership", "conflict", "mentored"}
+
+    hiring_triggers = {"hire", "strength", "strengths", "fit", "why"}
+    hiring_evidence = {"experience", "skills", "strength", "built", "delivered", "impact", "value", "fit", "contribution"}
+
+    failure_triggers = {"failure", "mistake", "learn", "learning", "lesson"}
+    failure_evidence = {"failure", "mistake", "learned", "lesson", "improved", "changed", "adapted", "fixed"}
+
+    achievement_triggers = {"goal", "achievement", "achieved", "success", "proud"}
+    achievement_evidence = {"achieved", "delivered", "result", "impact", "increased", "reduced", "saved", "success", "completed"}
+
+    def present(terms: set[str]) -> set[str]:
+        return {term for term in terms if re.search(rf"(?<![a-z0-9+#]){re.escape(term)}(?![a-z0-9+#])", a)}
+
     score = 0
-    for triggers, evidence_terms in groups:
-        if triggers.intersection(set(q.split())) or any(term in q for term in triggers):
-            score = max(score, min(100, 20 + sum(1 for term in evidence_terms if re.search(rf"\b{re.escape(term)}\b", a)) * 18))
+
+    if question_tokens.intersection(project_triggers) or any(term in q for term in (
+        "tell me about a project", "difficult project", "challenging project",
+        "project you solved", "challenge you solved", "problem you solved",
+    )):
+        actions = present(project_actions)
+        artifacts = present(project_artifacts)
+        outcomes = present(project_outcomes)
+        has_number = bool(re.search(r"\b\d+(?:\.\d+)?%?\b", a))
+
+        # A concrete project narrative should score as relevant even when it uses
+        # vocabulary different from the prompt. Action + artifact is enough;
+        # action + outcome or a measurable result is stronger.
+        if actions and (artifacts or outcomes or has_number):
+            score = max(score, 78)
+        elif actions or artifacts:
+            score = max(score, 55)
+
+    if question_tokens.intersection(team_triggers):
+        evidence = present(team_evidence)
+        score = max(score, min(100, 25 + len(evidence) * 15))
+
+    if question_tokens.intersection(hiring_triggers):
+        evidence = present(hiring_evidence)
+        score = max(score, min(100, 20 + len(evidence) * 14))
+
+    if question_tokens.intersection(failure_triggers):
+        evidence = present(failure_evidence)
+        score = max(score, min(100, 25 + len(evidence) * 15))
+
+    if question_tokens.intersection(achievement_triggers):
+        evidence = present(achievement_evidence)
+        score = max(score, min(100, 25 + len(evidence) * 15))
+
     return score
 
 
@@ -275,7 +348,18 @@ def analyze_interview_response(question: str, answer: str) -> dict:
     overlap = len(question_terms & answer_terms) / max(1, len(question_terms)) * 100
     topic_evidence = _topic_evidence(normalized_question, normalized)
 
-    relevance = round(min(100, semantic_relevance * 0.55 + overlap * 0.2 + topic_evidence * 0.25), 2)
+    relevance = round(min(100, semantic_relevance * 0.35 + overlap * 0.15 + topic_evidence * 0.5), 2)
+
+    # Strong intent-specific evidence should be allowed to rescue a relevant answer
+    # whose vocabulary differs substantially from the question. For example,
+    # “Tell me about a difficult project you solved” can be answered with
+    # “Built MLOps for Clearance AI ... boosting sell-through 3.6%” without
+    # repeating the words “difficult” or “solved”.
+    if topic_evidence >= 70:
+        relevance = max(
+            relevance,
+            min(95, 70 + (topic_evidence - 70) * 0.35 + semantic_relevance * 0.10 + min(5, overlap * 0.05)),
+        )
 
     # Hard floor for clearly unrelated answers. This is intentionally conservative:
     # an answer may use different vocabulary from the question while still being

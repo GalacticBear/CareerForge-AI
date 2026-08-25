@@ -224,23 +224,81 @@ def detect_skill_gap(
     }
 
 
+def _question_keywords(question: str) -> set[str]:
+    stop_words = {
+        "a", "an", "the", "and", "or", "to", "of", "for", "in", "on", "at", "is", "are",
+        "was", "were", "be", "do", "did", "you", "your", "me", "my", "tell", "about", "how",
+        "what", "why", "when", "where", "which", "can", "could", "would", "should", "have", "has",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9+#.]+", _normalize(question))
+        if len(token) > 2 and token not in stop_words
+    }
+
+
+def _topic_evidence(question: str, answer: str) -> int:
+    q = _normalize(question)
+    a = _normalize(answer)
+    groups = [
+        ({"project", "challenge", "difficult", "problem", "solved", "solution"}, {"project", "platform", "system", "solution", "built", "developed", "implemented", "created", "deployed", "designed", "solved", "challenge", "problem"}),
+        ({"team", "teammate", "collaboration", "conflict", "leadership"}, {"team", "teammate", "collaborated", "collaboration", "stakeholder", "led", "leadership", "conflict"}),
+        ({"hire", "strength", "strengths", "fit", "why"}, {"experience", "skills", "strength", "built", "delivered", "impact", "value", "fit"}),
+        ({"failure", "mistake", "learn"}, {"failure", "mistake", "learned", "lesson", "improved", "changed"}),
+        ({"goal", "achievement", "achieved", "success"}, {"achieved", "delivered", "result", "impact", "increased", "reduced", "saved", "success"}),
+    ]
+    score = 0
+    for triggers, evidence_terms in groups:
+        if triggers.intersection(set(q.split())) or any(term in q for term in triggers):
+            score = max(score, min(100, 20 + sum(1 for term in evidence_terms if re.search(rf"\b{re.escape(term)}\b", a)) * 18))
+    return score
+
+
 def analyze_interview_response(question: str, answer: str) -> dict:
+    normalized_question = _normalize(question)
     normalized = _normalize(answer)
     word_count = len(normalized.split())
     sentences = [s.strip() for s in re.split(r"[.!?]+", normalized) if s.strip()]
     sentence_count = max(1, len(sentences))
     first_person = len(re.findall(r"\b(i|we|my|our)\b", normalized))
-    evidence_terms = len(re.findall(r"\b(because|for example|for instance|measured|result|improved|increased|reduced|achieved|learned)\b", normalized))
+    evidence_terms = len(re.findall(r"\b(because|for example|for instance|measured|result|improved|increased|reduced|achieved|learned|built|developed|implemented|deployed|designed)\b", normalized))
     filler_terms = len(re.findall(r"\b(um|uh|like|you know|basically|sort of|kind of)\b", normalized))
     negative_terms = len(re.findall(r"\b(hate|terrible|impossible|can't|cannot|never|angry|stupid)\b", normalized))
 
-    relevance = min(100, 35 + min(45, word_count * 0.55) + min(20, evidence_terms * 4))
+    # Relevance is anchored to the interview question. Use the existing embedding
+    # model when available and combine it with lexical/topic evidence. This prevents
+    # unrelated answers from receiving a misleadingly high score merely because they
+    # are long, grammatical, or written in first person.
+    semantic_relevance = compute_semantic_match_score(normalized_question, normalized)
+    question_terms = _question_keywords(normalized_question)
+    answer_terms = set(re.findall(r"[a-z0-9+#.]+", normalized))
+    overlap = len(question_terms & answer_terms) / max(1, len(question_terms)) * 100
+    topic_evidence = _topic_evidence(normalized_question, normalized)
+
+    relevance = round(min(100, semantic_relevance * 0.55 + overlap * 0.2 + topic_evidence * 0.25), 2)
+
+    # Hard floor for clearly unrelated answers. This is intentionally conservative:
+    # an answer may use different vocabulary from the question while still being
+    # relevant, but an answer with no semantic/topic/keyword evidence should not pass.
+    if semantic_relevance < 25 and overlap == 0 and topic_evidence == 0:
+        relevance = min(relevance, 15)
+    elif semantic_relevance < 35 and topic_evidence < 25 and overlap < 10:
+        relevance = min(relevance, 35)
+
     clarity = max(0, min(100, 100 - filler_terms * 12 - max(0, sentence_count - 10) * 2))
     professionalism = max(0, min(100, 82 + first_person * 1.5 + evidence_terms * 2 - negative_terms * 10))
-    specificity = min(100, 35 + evidence_terms * 9 + (10 if re.search(r"\d", normalized) else 0))
-    quality = round(relevance * 0.35 + clarity * 0.2 + professionalism * 0.2 + specificity * 0.25, 2)
+    specificity = min(100, 25 + evidence_terms * 8 + (15 if re.search(r"\d", normalized) else 0) + min(20, max(0, word_count - 35) * 0.4))
 
-    if quality >= 85:
+    # Relevance is deliberately the largest weight because it is the main bug fixed.
+    quality = round(relevance * 0.45 + clarity * 0.15 + professionalism * 0.15 + specificity * 0.25, 2)
+    if relevance < 25:
+        quality = min(25.0, quality)
+    elif relevance < 40:
+        quality = min(45.0, quality)
+
+    if relevance < 25:
+        tone = "off-topic or not responsive"
+    elif quality >= 85:
         tone = "confident and professional"
     elif professionalism >= 72:
         tone = "professional with room to sharpen"
@@ -248,8 +306,12 @@ def analyze_interview_response(question: str, answer: str) -> dict:
         tone = "uncertain or overly negative"
 
     suggestions = []
+    if relevance < 35:
+        suggestions.append("Your answer does not clearly address the question. Directly answer the prompt and explain the relevant situation or experience.")
+    if relevance < 65 and not suggestions:
+        suggestions.append("Connect your example more explicitly to the question and explain why it was relevant.")
     if evidence_terms < 2:
-        suggestions.append("Add a concrete example and measurable outcome.")
+        suggestions.append("Add a concrete example with the actions you took and the measurable result.")
     if word_count < 55:
         suggestions.append("Expand the response with context, action, and result.")
     if filler_terms > 0:
@@ -268,5 +330,5 @@ def analyze_interview_response(question: str, answer: str) -> dict:
         },
         "word_count": word_count,
         "question": question,
-        "suggestions": suggestions,
+        "suggestions": suggestions[:3],
     }

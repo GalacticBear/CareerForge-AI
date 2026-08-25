@@ -3,6 +3,9 @@ const Job = require('../models/Job');
 const Resume = require('../models/Resume');
 const AnalysisResult = require('../models/AnalysisResult');
 
+// Built-in demo roles. Existing seeded roles are preserved; missing roles are
+// inserted automatically so an existing production database can be upgraded
+// without deleting user data.
 const defaultJobs = [
   {
     title: 'Full Stack Engineer', company: 'NovaCloud', location: 'Remote', seniority: 'Mid-level', salaryRange: '$90k–$125k',
@@ -24,18 +27,76 @@ const defaultJobs = [
     skills: ['python', 'sql', 'pandas', 'data analysis', 'power bi', 'communication'],
     description: 'Analyze business data with SQL and Python, create dashboards in Power BI, and communicate findings clearly to business stakeholders.',
   },
+  {
+    title: 'Frontend Developer', company: 'PixelForge', location: 'Remote', seniority: 'Entry–Mid', salaryRange: '$70k–$105k',
+    skills: ['javascript', 'typescript', 'react', 'rest api', 'git'],
+    description: 'Build responsive user interfaces with JavaScript, TypeScript and React. Integrate REST APIs and collaborate with designers and backend engineers.',
+  },
+  {
+    title: 'Backend Developer', company: 'DataSpring', location: 'Hyderabad / Hybrid', seniority: 'Mid-level', salaryRange: '$80k–$120k',
+    skills: ['javascript', 'node.js', 'express', 'mongodb', 'rest api', 'docker', 'git'],
+    description: 'Develop secure backend services with Node.js and Express. Design REST APIs, work with MongoDB, containerize services with Docker, and maintain clean Git workflows.',
+  },
+  {
+    title: 'Software Engineer', company: 'TechCore', location: 'Pune / Hybrid', seniority: 'Mid-level', salaryRange: '$85k–$125k',
+    skills: ['javascript', 'python', 'git', 'docker', 'rest api', 'problem solving'],
+    description: 'Develop reliable software features across backend and platform services. Apply software engineering fundamentals, problem solving, Git and Docker in a collaborative environment.',
+  },
+  {
+    title: 'Data Scientist', company: 'InsightAI', location: 'Bengaluru / Hybrid', seniority: 'Mid-level', salaryRange: '$95k–$140k',
+    skills: ['python', 'pandas', 'numpy', 'scikit-learn', 'machine learning', 'sql', 'data analysis'],
+    description: 'Build data science solutions using Python, pandas, NumPy and scikit-learn. Explore datasets with SQL and translate analysis into useful business decisions.',
+  },
+  {
+    title: 'AI Engineer', company: 'NeuralWorks', location: 'Remote', seniority: 'Mid-level', salaryRange: '$105k–$150k',
+    skills: ['python', 'machine learning', 'deep learning', 'pytorch', 'nlp', 'fastapi', 'docker'],
+    description: 'Develop applied AI systems using Python, machine learning, deep learning and NLP. Package models behind FastAPI services and deploy them with Docker.',
+  },
+  {
+    title: 'DevOps Engineer', company: 'CloudOps', location: 'Remote', seniority: 'Mid-level', salaryRange: '$90k–$135k',
+    skills: ['docker', 'kubernetes', 'aws', 'azure', 'git', 'rest api'],
+    description: 'Automate and operate cloud-native workloads using Docker, Kubernetes and cloud platforms. Improve deployment reliability, observability and developer workflows.',
+  },
+  {
+    title: 'Cloud Engineer', company: 'SkyScale', location: 'Chennai / Hybrid', seniority: 'Mid-level', salaryRange: '$90k–$135k',
+    skills: ['aws', 'azure', 'docker', 'kubernetes', 'python', 'git'],
+    description: 'Design and support cloud infrastructure across AWS and Azure. Automate services with Python, containerize workloads with Docker, and operate Kubernetes platforms.',
+  },
+  {
+    title: 'MLOps Engineer', company: 'ModelFlow', location: 'Remote', seniority: 'Senior', salaryRange: '$115k–$165k',
+    skills: ['python', 'machine learning', 'docker', 'kubernetes', 'aws', 'git'],
+    description: 'Build reliable machine learning delivery pipelines. Package models with Docker, operate Kubernetes workloads, automate cloud deployments, and collaborate with data science teams.',
+  },
+  {
+    title: 'Python Developer', company: 'CodeWorks', location: 'Delhi / Hybrid', seniority: 'Entry–Mid', salaryRange: '$65k–$100k',
+    skills: ['python', 'fastapi', 'flask', 'sql', 'git', 'rest api'],
+    description: 'Develop Python applications and APIs using FastAPI or Flask. Work with SQL, REST APIs and Git to deliver maintainable production software.',
+  },
+  {
+    title: 'Cybersecurity Analyst', company: 'SecureGrid', location: 'Remote', seniority: 'Entry–Mid', salaryRange: '$70k–$105k',
+    skills: ['python', 'sql', 'communication', 'problem solving', 'git'],
+    description: 'Investigate security events, automate analysis with Python and SQL, document findings clearly, and collaborate with engineering teams on practical security improvements.',
+  },
 ];
 
 async function ensureSeedJobs() {
-  const count = await Job.countDocuments({ active: true });
-  if (count > 0) return;
-  await Job.insertMany(defaultJobs);
+  // Migrate older deployments that already contain the original four roles.
+  // Insert only missing built-in roles so we never duplicate or delete jobs.
+  await Promise.all(
+    defaultJobs.map((job) =>
+      Job.updateOne(
+        { title: job.title, company: job.company },
+        { $setOnInsert: { ...job } },
+        { upsert: true },
+      ),
+    ),
+  );
 }
 
 async function listJobs(req, res, next) {
   try {
     await ensureSeedJobs();
-    const jobs = await Job.find({ active: true }).sort({ createdAt: -1 }).lean();
+    const jobs = await Job.find({ active: true }).sort({ title: 1, company: 1 }).lean();
     return res.json({ jobs });
   } catch (error) { next(error); }
 }
@@ -47,7 +108,7 @@ async function matchJob(req, res, next) {
 
     const [resume, job] = await Promise.all([
       Resume.findOne({ user: req.user._id }).lean(),
-      Job.findById(jobId).lean(),
+      Job.findOne({ _id: jobId, active: true }).lean(),
     ]);
     if (!resume) return res.status(409).json({ message: 'Upload a resume before matching jobs' });
     if (!job) return res.status(404).json({ message: 'Job not found' });
@@ -82,6 +143,7 @@ async function matchJob(req, res, next) {
     return res.json({ job, analysis: data });
   } catch (error) {
     if (error.response?.data?.detail) return res.status(502).json({ message: error.response.data.detail });
+    if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') return res.status(504).json({ message: 'AI matching service timed out. Please try again.' });
     next(error);
   }
 }
@@ -103,6 +165,7 @@ async function evaluateInterview(req, res, next) {
     return res.json(response.data);
   } catch (error) {
     if (error.response?.data?.detail) return res.status(502).json({ message: error.response.data.detail });
+    if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') return res.status(504).json({ message: 'Interview evaluation timed out. Please try again.' });
     next(error);
   }
 }
